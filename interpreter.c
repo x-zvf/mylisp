@@ -1,12 +1,13 @@
+
+//#define L_INTERPRETER_IMPLEMENTATION
+#include "linterpreter.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <errno.h>
-
-//#define L_INTERPRETER_IMPLEMENTATION
-#include "linterpreter.h"
 
 
 int main(int argc, char **argv) {
@@ -36,6 +37,7 @@ int main(int argc, char **argv) {
 
    l_interpreter_t *interpreter = l_interpreter_create(); 
    l_value_t result = l_interpreter_eval(interpreter, script);
-   l_debug_print_value(&result);
+   (void) result;
+   //l_debug_print_value(&result);
    l_interpreter_destroy(interpreter);
 }
