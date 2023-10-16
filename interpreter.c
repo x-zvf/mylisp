@@ -5,6 +5,17 @@
 #include <ctype.h>
 #include <errno.h>
 
+#define MAX_TOKEN_LENGTH 4096
+
+void *MALLOC(size_t size) {
+    void *ptr = malloc(size);
+    if(ptr == NULL) {
+        perror("malloc");
+        exit(1);
+    }
+    return ptr;
+}
+
 typedef enum TokenType {
     LPAREN,
     RPAREN,
@@ -51,11 +62,8 @@ typedef struct Vector {
 } Vector;
 
 Vector *vec_create(size_t elementSize, size_t capacity) {
-    Vector *vec = malloc(sizeof(Vector));
-    if(vec == NULL) {
-        perror("malloc");
-        exit(1);
-    }
+
+    Vector *vec = MALLOC(sizeof(Vector));
     vec->elementSize = elementSize;
     vec->length = 0;
     vec->capacity = capacity;
@@ -139,7 +147,6 @@ void dump_tokens(Vector *tokenStream, Vector *sourceRanges) {
         printf(" @ %ld:%ld-%ld:%ld\n", range->start.line, range->start.column, range->end.line, range->end.column);
     }
 }
-#define MAX_TOKEN_LENGTH 4096
 
 bool isSymbol(char c) {
     return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -175,6 +182,41 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
         PARSE_CHARACTER,
     } state = PARSE_START;
 
+#define PUSH_TOKEN(T)                                                           \
+    vec_push(tokenStream, &T);                                                  \
+    SourceRange range = {                                                       \
+        .start = {                                                              \
+            .line = line,                                                       \
+            .column = column - currentTokenLength,                              \
+            .offset = index-currentTokenLength},                                \
+        .end = {                                                                \
+            .line = line,                                                       \
+            .column = column,                                                   \
+            .offset = index}};                                                  \
+    vec_push(sourceRanges, &range);                                             \
+    currentTokenLength = 0;                                                     \
+    state = PARSE_START;
+
+
+#define TOKENIZE_ERROR(...)                                                     \
+    do {                                                                        \
+        fprintf(stderr, "Error: Tokenizer failed while state=%d @ [%zu:%zu (idx=%zu)]:\n    ",    \
+                state, line, column, index);                                    \
+        fprintf(stderr, __VA_ARGS__);                                           \
+        return false;                                                           \
+    } while (0)
+
+
+#define VERIFY_ERRNO(TYPE)                                                      \
+    if(errno == ERANGE) {                                                       \
+        fprintf(stderr, "Error: " #TYPE " literal out of range at %ld:%ld\n", line, column); \
+        return false;                                                           \
+    } else if(errno) {                                                          \
+        perror("unknown parsing error");                                        \
+        return false;                                                           \
+    }
+
+
     while(index < scriptSize) {
         if(script[index] == 0) {
             break;
@@ -183,7 +225,7 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
             case PARSE_START:
                 {
                     if(script[index] == '-' && script[index + 1] == '-') {
-                        //skip comment
+                        //skip comments
                         while(script[index] != '\n' && script[index] != 0 && index < scriptSize) {
                             index++;
                         }
@@ -195,32 +237,12 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                         column = 1;
                     }else if(script[index] == '(') {
                         Token token = {.type = LPAREN, .id = tokenID++, .value.number = 0};
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index - currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
+                        PUSH_TOKEN(token);
                         index++;
                         column++;
                     } else if(script[index] == ')') {
                         Token token = {.type = RPAREN, .id = tokenID++, .value.number = 0};
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
+                        PUSH_TOKEN(token);
                         index++;
                         column++;
                     } else if(script[index] == '"') {
@@ -233,17 +255,7 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                         column++;
                     } else if(script[index] == '\'') {
                         Token token = {.type = QUOTE, .id = tokenID++, .value.number = 0};
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
+                        PUSH_TOKEN(token);
                         index++;
                         column++;
                     } else if(script[index] == '\\') {
@@ -270,8 +282,7 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isSymbol(script[index])) {
                         state = PARSE_SYMBOL;
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing START at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c'\n", script[index]);
                     }
                 }
                 break;
@@ -283,29 +294,12 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isspace(script[index]) || script[index] == ')') {
                         buffer[currentTokenLength] = '\0';
                         //copy string without strdup
-                        char *symbol = malloc(currentTokenLength + 1);
-                        if(symbol == NULL) {
-                            perror("malloc");
-                            exit(1);
-                        }
+                        char *symbol = MALLOC(sizeof(char)*(currentTokenLength + 1));
                         memcpy(symbol, buffer, currentTokenLength + 1);
                         Token token = {.type = SYMBOL, .id = tokenID++, .value.symbol = symbol};
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        PUSH_TOKEN(token);
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing SYMBOL at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' while parsing SYMBOL\n", script[index]);
                     }
                 }
                 break;
@@ -324,26 +318,10 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isspace(script[index]) || script[index] == ')') {
                         buffer[currentTokenLength] = '\0';
                         Token token = {.type = INTEGER, .id = tokenID++, .value.number = strtoll(buffer, NULL, 10)};
-                        if(errno == ERANGE) {
-                            fprintf(stderr, "Error: Integer '%s' out of range at %ld:%ld\n", buffer, line, column);
-                            return false;
-                        }
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        VERIFY_ERRNO(INTEGER);
+                        PUSH_TOKEN(token);
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing INTEGER at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' while parsing INTEGER\n", script[index]);
                     }
                 }
                 break;
@@ -357,26 +335,10 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isspace(script[index]) || script[index] == ')') {
                         buffer[currentTokenLength] = '\0';
                         Token token = {.type = INTEGER, .id = tokenID++, .value.number = strtoll(buffer, NULL, 16)};
-                        if(errno == ERANGE) {
-                            fprintf(stderr, "Error: Hexadecimal integer '%s' out of range at %ld:%ld\n", buffer, line, column);
-                            return false;
-                        }
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        VERIFY_ERRNO(INTEGER);
+                        PUSH_TOKEN(token);
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing HEX INTEGER at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' while parsing HEX INTEGER\n", script[index]);
                     }
                 }
                 break;
@@ -388,26 +350,10 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isspace(script[index]) || script[index] == ')') {
                         buffer[currentTokenLength] = '\0';
                         Token token = {.type = INTEGER, .id = tokenID++, .value.number = strtoll(buffer, NULL, 2)};
-                        if(errno == ERANGE) {
-                            fprintf(stderr, "Error: Binary integer '%s' out of range at %ld:%ld\n", buffer, line, column);
-                            return false;
-                        }
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        VERIFY_ERRNO(INTEGER);
+                        PUSH_TOKEN(token);
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing BINARY INTEGER at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' while parsing BINARY INTEGER\n", script[index]);
                     }
                 }
                 break;
@@ -419,26 +365,10 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isspace(script[index]) || script[index] == ')') {
                         buffer[currentTokenLength] = '\0';
                         Token token = {.type = INTEGER, .id = tokenID++, .value.number = strtoll(buffer, NULL, 8)};
-                        if(errno == ERANGE) {
-                            fprintf(stderr, "Error: Octal integer '%s' out of range at %ld:%ld\n", buffer, line, column);
-                            return false;
-                        }
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        VERIFY_ERRNO(INTEGER);
+                        PUSH_TOKEN(token);
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing OCTAL INTEGER at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' while parsing OCTAL INTEGER\n", script[index]);
                     }
                 }
                 break;
@@ -451,23 +381,8 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                     } else if(isspace(script[index]) || script[index] == ')') {
                         buffer[currentTokenLength] = '\0';
                         Token token = {.type = REAL, .id = tokenID++, .value.real = strtold(buffer, NULL)};
-                        if(errno == ERANGE) {
-                            fprintf(stderr, "Error: Real number '%s' out of range at %ld:%ld\n", buffer, line, column);
-                            return false;
-                        }
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        VERIFY_ERRNO(REAL);
+                        PUSH_TOKEN(token);
                     }
                 }
                 break;
@@ -479,34 +394,16 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                         column += 2;
                     } else if(script[index] == '"') {
                         buffer[currentTokenLength] = '\0';
-                        char *string = malloc(currentTokenLength + 1);
-                        if(string == NULL) {
-                            perror("malloc");
-                            exit(1);
-                        }
+                        char *string = MALLOC(sizeof(char)*(currentTokenLength + 1));
                         memcpy(string, buffer, currentTokenLength + 1);
                         Token token = {.type = STRING, .id = tokenID++, .value.string = string};
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index - currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
+                        PUSH_TOKEN(token);
                         index++;
                         column++;
-                        state = PARSE_START;
                     } else if(script[index] == '\n') {
                         buffer[currentTokenLength++] = script[index++];
                         column = 1;
                         line++;
-                        //fprintf(stderr, "Error: Unexpected newline while parsing STRING at %ld:%ld\n", line, column);
-                        //return false;
                     } else {
                         buffer[currentTokenLength++] = script[index++];
                         column++;
@@ -516,24 +413,11 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
             case PARSE_BOOLEAN:
                 {
                     if(script[index] == 'f' || script[index] == 't') {
-                        bool value = script[index] == 't';
+                        bool value = script[index++] == 't';
                         Token token = {.type = BOOLEAN, .id = tokenID++, .value.boolean = value};
-                        vec_push(tokenStream, &token);
-                        SourceRange range = {
-                            .start = {
-                                .line = line,
-                                .column = column - currentTokenLength,
-                                .offset = index-currentTokenLength},
-                            .end = {
-                                .line = line,
-                                .column = column,
-                                .offset = index}};
-                        vec_push(sourceRanges, &range);
-                        currentTokenLength = 0;
-                        state = PARSE_START;
+                        PUSH_TOKEN(token);
                     } else {
-                        fprintf(stderr, "Error: Unexpected character '%c' while parsing BOOLEAN at %ld:%ld\n", script[index], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' while parsing BOOLEAN\n", script[index]);
                     }
                 } break;
             case PARSE_CHARACTER:
@@ -570,52 +454,32 @@ bool tokenize(size_t scriptSize, char *script, Vector **out_tokenStream, Vector 
                                 escaped = ')';
                                 break;
                             default:
-                                fprintf(stderr, "Error: Unexpected escape character '\\%c' at %ld:%ld\n", script[index+1], line, column);
-                                return false;
+                                TOKENIZE_ERROR("Unexpected escape character '\\%c' at %ld:%ld\n", script[index+1], line, column);
                         }
                         if(index + 2 < scriptSize && (!isspace(script[index + 2]) && script[index+2] != ')')) {
-                            fprintf(stderr, "Error: Unexpected character '%c' after escape character '\\%c' at %ld:%ld\n", script[index+2], script[index+1], line, column);
-                            return false;
+                            TOKENIZE_ERROR("Unexpected character '%c' after escape character '\\%c' at %ld:%ld\n", script[index+2], script[index+1], line, column);
                         }
                         c = escaped;
                         index += 3;
                         column += 3;
                     } else if(index + 1 < scriptSize && !isspace(script[index+1]) && script[index+1] != ')') {
-                        fprintf(stderr, "Error: Unexpected character '%c' after CHARACTER at %ld:%ld\n", script[index+2], line, column);
-                        return false;
+                        TOKENIZE_ERROR("Unexpected character '%c' after CHARACTER at %ld:%ld\n", script[index+1], line, column);
                     } else {
                         c = script[index];
                         index += 2;
                         column += 2;
                     }
                     Token token = {.type = CHARACTER, .id = tokenID++, .value.character = c};
-                    vec_push(tokenStream, &token);
-                    SourceRange range = {
-                        .start = {
-                            .line = line,
-                            .column = column - currentTokenLength,
-                            .offset = index-currentTokenLength},
-                        .end = {
-                            .line = line,
-                            .column = column,
-                            .offset = index}};
-                    vec_push(sourceRanges, &range);
-                    currentTokenLength = 0;
-                    state = PARSE_START;
+                    PUSH_TOKEN(token);
                 }
                 break;
             default:
-                {
-                    fprintf(stderr, "Error: Unexpected state %d\n", state);
-                    return false;
-                }
-                break;
+                TOKENIZE_ERROR("Unhandled state %d\n", state);
         }
 
     }
     if(state != PARSE_START) {
-        fprintf(stderr, "Error: Unexpected end of file while parsing %d at %ld:%ld\n", state, line, column);
-        return false;
+        TOKENIZE_ERROR("Unexpected end of file while parsing.\n");
     }
 
     *out_tokenStream = tokenStream;
@@ -639,11 +503,8 @@ int main(int argc, char **argv) {
     fseek(scriptF, 0, SEEK_END);
     size_t scriptSize = ftell(scriptF);
     fseek(scriptF, 0, SEEK_SET);
-    char *script = malloc(scriptSize + 1);
-    if(script == NULL) {
-        perror("malloc");
-        exit(1);
-    }
+
+    char *script = MALLOC(sizeof(char)*(scriptSize + 1));
     fread(script, 1, scriptSize, scriptF);
     script[scriptSize] = '\0';
 

@@ -1,12 +1,12 @@
 (parse me)
-
+#f #t 134 "a"
 12
 0
 0x0
 0b0
 
 
-
+--this is a comment it should be ignored #f " 123 foo 0x222 \\\\\
 
 0o0
 0124
