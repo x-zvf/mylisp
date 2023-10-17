@@ -11,9 +11,6 @@
 #include <stdbool.h>
 
 
-typedef struct lInterpreter {
-    int foo;
-} l_interpreter_t;
 
 typedef enum lValueType {
     L_VALUE_ERROR,
@@ -35,14 +32,16 @@ typedef struct lVector {
     size_t length;
     size_t element_size;
     void *data;
+    void (*destroy)(void *data);
 } l_vector_t;
 
 typedef struct lValue {
     l_value_type_t type;
     union {
-        double doubleValue;
-        long long longValue;
-        char* string;
+        double double_value;
+        long long long_value;
+        size_t string_index;
+        size_t symbol_index;
         char character;
         bool boolean;
         l_vector_t list;
@@ -50,6 +49,29 @@ typedef struct lValue {
     char flags;
     
 } l_value_t;
+
+//TODO: make this a hash table
+typedef struct lTable {
+    l_vector_t keys;
+    l_vector_t values;
+} l_table_t;
+
+typedef struct lRefCounted {
+    size_t ref_count;
+    void *data;
+    void (*destroy)(void *data);
+} l_ref_counted_t;
+
+typedef struct lEnvironment {
+    l_table_t *symbol_table;
+    struct lEnvironment *parent;
+} l_environment_t;
+
+typedef struct lInterpreter {
+    //l_environment_t *global_environment;
+    //l_environment_t *current_environment;
+    l_vector_t *string_table; //<RefCounted<char*>>
+} l_interpreter_t;
 
 typedef enum lTokenType {
     TOKEN_PLACEHOLDER = 0,
@@ -95,22 +117,36 @@ l_interpreter_t* l_interpreter_create();
 void l_interpreter_destroy(l_interpreter_t* interpreter);
 
 l_value_t l_interpreter_eval(l_interpreter_t* interpreter, const char* source);
-//l_value_t l_interpreter_read();
+l_value_t l_interpreter_execute(l_interpreter_t *interpreter, l_value_t s_expression);
 
-void l_debug_print_value(l_value_t *value);
+void l_debug_print_value(l_value_t *value, l_vector_t *string_table);
 void l_debug_print_token(l_token_t *token);
 
 l_token_t l_tokenizer_next(l_tokenizer_t *tokenizer);
 
-l_value_t l_parse_expression(l_token_t first, l_tokenizer_t *tokenizer);
-l_value_t l_parse_list(l_tokenizer_t *tokenizer);
-l_value_t l_parse_atom(l_token_t *token);
-l_value_t l_parse_quote(l_tokenizer_t *tokenizer);
+l_value_t l_parse_expression(l_token_t first, l_tokenizer_t *tokenizer, l_vector_t **string_table);
+l_value_t l_parse_list(l_tokenizer_t *tokenizer, l_vector_t **string_table);
+l_value_t l_parse_atom(l_token_t *token, l_vector_t **string_table);
+l_value_t l_parse_quote(l_tokenizer_t *tokenizer, l_vector_t **string_table);
 
-void l_vector_init(l_vector_t *vector, size_t element_size, size_t initial_capacity);
+void l_vector_init(l_vector_t *vector, size_t element_size, size_t initial_capacity, void (*destroy)(void *data));
 void l_vector_destroy(l_vector_t *vector);
 void l_vector_push(l_vector_t *vector, void *element);
 void *l_vector_get(l_vector_t *vector, size_t index);
+
+void l_table_init(l_table_t *table, size_t key_size, size_t value_size, size_t initial_capacity);
+void l_table_destroy(l_table_t *table);
+
+size_t l_intern_string(l_vector_t **string_table, const char *string, bool eternal);
+const char *l_get_interned_string(l_vector_t *string_table, size_t index);
+
+void l_ref_counted_init(l_ref_counted_t *ref_counted, void *data, void (*destroy)(void *data));
+void l_ref_counted_destroy(l_ref_counted_t *ref_counted);
+
+void l_environment_init(l_environment_t *environment, l_environment_t *parent);
+void l_environment_destroy(l_environment_t *environment);
+
+void l_value_destroy(l_value_t *value);
 #define L_INTERPRETER_IMPLEMENTATION 1
 
 
@@ -120,10 +156,11 @@ void *l_vector_get(l_vector_t *vector, size_t index);
 
 #ifdef L_INTERPRETER_IMPLEMENTATION 
 
-void l_vector_init(l_vector_t *vector, size_t element_size, size_t initial_capacity) {
+void l_vector_init(l_vector_t *vector, size_t element_size, size_t initial_capacity, void (*destroy)(void *data)) {
     vector->capacity = initial_capacity;
     vector->length = 0;
     vector->element_size = element_size;
+    vector->destroy = destroy;
     if(initial_capacity > 0) {
         vector->data = malloc(element_size * initial_capacity);
         if(vector->data == NULL) {
@@ -136,6 +173,11 @@ void l_vector_init(l_vector_t *vector, size_t element_size, size_t initial_capac
 }
 
 void l_vector_destroy(l_vector_t *vector) {
+    if(vector->destroy != NULL) {
+        for(size_t i = 0; i < vector->length; i++) {
+            vector->destroy((char *)vector->data + i * vector->element_size);
+        }
+    }
     free(vector->data);
     vector->data = NULL;
     vector->capacity = 0;
@@ -401,59 +443,116 @@ l_value_t l_interpreter_eval(l_interpreter_t *interpreter, const char *source) {
     l_token_t first = l_tokenizer_next(&tokenizer);
     l_value_t result;
     while(first.type != TOKEN_EOF) {
-        result = l_parse_expression(first, &tokenizer);
-        l_debug_print_value(&result);
+        result = l_parse_expression(first, &tokenizer, &interpreter->string_table);
+        l_debug_print_value(&result, interpreter->string_table);
+
+        if(result.type == L_VALUE_ERROR) {
+            break;
+        }
+
+        if(result.type == L_VALUE_LIST) {
+            result = l_interpreter_execute(interpreter, result);
+        }
+
         printf("\n");
+        l_value_destroy(&result);
         first = l_tokenizer_next(&tokenizer);
     }
 
     return result;
 }
 
-l_value_t l_parse_expression(l_token_t first, l_tokenizer_t *tokenizer) {
+l_value_t l_interpreter_execute(l_interpreter_t *interpreter, l_value_t s_expression) {
+    (void) interpreter;
+    (void) s_expression;
+
+    return s_expression;
+}
+
+l_value_t l_parse_expression(l_token_t first, l_tokenizer_t *tokenizer, l_vector_t **string_table) {
     //l_token_t token = l_tokenizer_next(tokenizer);
+    const char *err_where = NULL;
+    const char *err_why = NULL;
     switch(first.type) {
         case TOKEN_LPAREN:
-            return l_parse_list(tokenizer);
+            return l_parse_list(tokenizer, string_table);
         case TOKEN_QUOTE:
-            return l_parse_quote(tokenizer);
+            return l_parse_quote(tokenizer, string_table);
         case TOKEN_REAL:
         case TOKEN_INTEGER:
         case TOKEN_STRING:
         case TOKEN_BOOLEAN:
         case TOKEN_CHARACTER:
         case TOKEN_SYMBOL:
-            return l_parse_atom(&first);
+            return l_parse_atom(&first, string_table);
         case TOKEN_ERROR:
-            fprintf(stderr, "Error during tokenization: %s\n", first.value.error_message);
+            err_where = "tokenization";
+            err_why = first.value.error_message;
             break;
         case TOKEN_EOF:
-            fprintf(stderr, "Unexpected end of file\n");
+            err_where = "parsing";
+            err_why = "unexpected end of file";
             break;
         case TOKEN_RPAREN:
-            fprintf(stderr, "Unexpected ')'\n");
+            err_where = "parsing";
+            err_why = "unexpected ')'";
             break;
         default:
-            fprintf(stderr, "Unhandled token type = %d\n", first.type);
+            err_where = "parsing";
+            err_why = "unhandled token type";
             break;
     }
-    return (l_value_t) {.type = L_VALUE_ERROR, .value.string = "Error during parsing"};
+    char *error_message;
+    asprintf(&error_message, "Error while parsing token type %d: where: %s why: %s", first.type, err_where, err_why);
+    size_t interned_index = l_intern_string(string_table, error_message, false);
+    return (l_value_t) {.type = L_VALUE_ERROR, .value.string_index = interned_index};
 }
 
 l_interpreter_t* l_interpreter_create() {
     l_interpreter_t* interpreter = (l_interpreter_t*)malloc(sizeof(l_interpreter_t));
+    interpreter->string_table = (l_vector_t*)malloc(sizeof(l_vector_t));
+    l_vector_init(interpreter->string_table, sizeof(l_ref_counted_t), 16, (void (*)(void *))l_ref_counted_destroy);
     return interpreter;
 }
 
-l_value_t l_parse_list(l_tokenizer_t *tokenizer) {
+void l_interpreter_destroy(l_interpreter_t* interpreter) {
+    l_vector_destroy(interpreter->string_table);
+    free(interpreter->string_table);
+    free(interpreter);
+}
+
+void l_value_destroy(l_value_t *value) {
+    switch(value->type) {
+        case L_VALUE_NIL:
+        case L_VALUE_BOOL:
+        case L_VALUE_CHARACTER:
+        case L_VALUE_NUMBER:
+            break;
+        case L_VALUE_LIST:
+            l_vector_destroy(&value->value.list);
+            break;
+        case L_VALUE_STRING:
+            {
+                //TODO: dec refcount
+            }
+            break;
+        case L_VALUE_ERROR:
+            break;
+        case L_VALUE_SYMBOL:
+            break;
+    }
+}
+
+l_value_t l_parse_list(l_tokenizer_t *tokenizer, l_vector_t **string_table) {
     l_value_t value = {.type = L_VALUE_LIST };
-    l_vector_init(&value.value.list, sizeof(l_value_t), 4);
+    l_vector_init(&value.value.list, sizeof(l_value_t), 4, (void (*)(void *))l_value_destroy);
 
     l_token_t token = l_tokenizer_next(tokenizer);
 
     while(token.type != TOKEN_RPAREN) {
-        l_value_t expression = l_parse_expression(token, tokenizer);
+        l_value_t expression = l_parse_expression(token, tokenizer, string_table);
         if(expression.type == L_VALUE_ERROR) {
+            l_vector_destroy(&value.value.list);
             return expression;
         }
         l_vector_push(&value.value.list, &expression);
@@ -462,15 +561,15 @@ l_value_t l_parse_list(l_tokenizer_t *tokenizer) {
     return value;
 }
 
-l_value_t l_parse_quote(l_tokenizer_t *tokenizer) {
+l_value_t l_parse_quote(l_tokenizer_t *tokenizer, l_vector_t **string_table) {
     l_value_t value = {.type = L_VALUE_LIST };
-    l_vector_init(&value.value.list, sizeof(l_value_t), 2);
+    l_vector_init(&value.value.list, sizeof(l_value_t), 2, (void (*)(void *))l_value_destroy);
 
-    l_value_t quote = {.type = L_VALUE_SYMBOL, .value.string = "quote"};
+    l_value_t quote = {.type = L_VALUE_SYMBOL, .value.symbol_index = l_intern_string(string_table, "quote", true)};
     l_vector_push(&value.value.list, &quote);
 
     l_token_t token = l_tokenizer_next(tokenizer);
-    l_value_t expression = l_parse_expression(token, tokenizer);
+    l_value_t expression = l_parse_expression(token, tokenizer, string_table);
     if(expression.type == L_VALUE_ERROR) {
         return expression;
     }
@@ -478,18 +577,18 @@ l_value_t l_parse_quote(l_tokenizer_t *tokenizer) {
     return value;
 }
 
-l_value_t l_parse_atom(l_token_t *token) {
+l_value_t l_parse_atom(l_token_t *token, l_vector_t **string_table) {
     switch(token->type) {
         case TOKEN_REAL: {
-            l_value_t value = {.type = L_VALUE_NUMBER, .value.doubleValue = token->value.real, .flags = L_VALUE_FLAG_REAL};
+            l_value_t value = {.type = L_VALUE_NUMBER, .value.double_value = token->value.real, .flags = L_VALUE_FLAG_REAL};
             return value;
         }
         case TOKEN_INTEGER: {
-            l_value_t value = {.type = L_VALUE_NUMBER, .value.longValue = token->value.number, .flags = L_VALUE_FLAG_INTEGER};
+            l_value_t value = {.type = L_VALUE_NUMBER, .value.long_value = token->value.number, .flags = L_VALUE_FLAG_INTEGER};
             return value;
         }
         case TOKEN_STRING: {
-            l_value_t value = {.type = L_VALUE_STRING, .value.string = token->value.string};
+            l_value_t value = {.type = L_VALUE_STRING, .value.string_index = l_intern_string(string_table, token->value.string, false)};
             return value;
         }
         case TOKEN_BOOLEAN: {
@@ -501,20 +600,52 @@ l_value_t l_parse_atom(l_token_t *token) {
             return value;
         }
         case TOKEN_SYMBOL: {
-            l_value_t value = {.type = L_VALUE_SYMBOL, .value.string = token->value.symbol};
+            l_value_t value = {.type = L_VALUE_SYMBOL, .value.symbol_index = l_intern_string(string_table, token->value.symbol, false)};
             return value;
         }
         default: {
-            printf("Error: Cannot convert token to value, type=%d\n", token->type);
-            l_value_t value = {.type = L_VALUE_ERROR};
+            char *error_message;
+            asprintf(&error_message, "Error: Cannot convert token to value, type=%d\n", token->type);
+            l_value_t value = {.type = L_VALUE_ERROR, .value.string_index = l_intern_string(string_table, error_message, false)};
             return value;
         }
 
     }
 }
 
-void l_interpreter_destroy(l_interpreter_t* interpreter) {
-    free(interpreter);
+size_t l_intern_string(l_vector_t **string_table, const char *string, bool eternal) {
+    for(size_t i = 0; i < (*string_table)->length; i++) {
+        l_ref_counted_t *ref_counted = (l_ref_counted_t *)l_vector_get(*string_table, i);
+        if(strcmp((char *)ref_counted->data, string) == 0) {
+            ref_counted->ref_count++;
+            return i;
+        }
+    }
+    l_ref_counted_t ref_counted;
+    l_ref_counted_init(&ref_counted, (void*)string, eternal ? NULL : (void (*)(void *))free);
+
+    l_vector_push(*string_table, &ref_counted);
+    return (*string_table)->length - 1;
+
+}
+const char *l_get_interned_string(l_vector_t *string_table, size_t index) {
+    l_ref_counted_t *ref_counted = (l_ref_counted_t *)l_vector_get(string_table, index);
+    return (const char *)ref_counted->data;
+}
+
+void l_ref_counted_init(l_ref_counted_t *ref_counted, void *data, void (*destroy)(void *data)) {
+    ref_counted->ref_count = 1;
+    ref_counted->data = data;
+    ref_counted->destroy = destroy;
+
+}
+void l_ref_counted_destroy(l_ref_counted_t *ref_counted) {
+    if(ref_counted->destroy != NULL) {
+        ref_counted->destroy(ref_counted->data);
+    }
+    ref_counted->data = NULL;
+    ref_counted->destroy = NULL;
+    ref_counted->ref_count = 0;
 }
 
 void l_debug_print_token(l_token_t *token) {
@@ -561,20 +692,20 @@ void l_debug_print_token(l_token_t *token) {
 
 
 }
-void l_debug_print_value(l_value_t *value) {
+void l_debug_print_value(l_value_t *value, l_vector_t *string_table) {
     switch(value->type) {
         case L_VALUE_ERROR: {
-            printf("ERROR: %s", value->value.string);
+            printf("ERROR: %s", l_get_interned_string(string_table, value->value.string_index));
         } break;
         case L_VALUE_NUMBER: {
             if(value->flags & L_VALUE_FLAG_INTEGER) {
-                printf("%lld", value->value.longValue);
+                printf("%lld", value->value.long_value);
             } else {
-                printf("%f", value->value.doubleValue);
+                printf("%f", value->value.double_value);
             }
         } break;
         case L_VALUE_STRING: {
-            printf("\"%s\"", value->value.string);
+            printf("\"%s\"", l_get_interned_string(string_table, value->value.string_index));
         } break;
         case L_VALUE_CHARACTER: {
             printf("\\%c", value->value.character);
@@ -586,13 +717,13 @@ void l_debug_print_value(l_value_t *value) {
             printf("nil");
         } break;
         case L_VALUE_SYMBOL: {
-            printf("%s", value->value.string);
+            printf("%s", l_get_interned_string(string_table, value->value.symbol_index));
         } break;
         case L_VALUE_LIST: {
             printf("(");
             for(size_t i = 0; i < value->value.list.length; i++) {
                 l_value_t *element = (l_value_t *)l_vector_get(&value->value.list, i);
-                l_debug_print_value(element);
+                l_debug_print_value(element, string_table);
                 if(i < value->value.list.length - 1) {
                     printf(" ");
                 }

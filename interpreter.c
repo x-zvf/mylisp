@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
    l_interpreter_t *interpreter = l_interpreter_create(); 
    l_value_t result = l_interpreter_eval(interpreter, script);
    (void) result;
+   free(script);
    //l_debug_print_value(&result);
+   l_value_destroy(&result);
    l_interpreter_destroy(interpreter);
 }
